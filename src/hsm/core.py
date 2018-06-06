@@ -19,6 +19,8 @@ from six import iteritems
 import collections
 from collections import deque
 import logging
+from threading import Thread
+
 _LOGGER = logging.getLogger("hsm.core")
 _LOGGER.addHandler(logging.NullHandler())
 
@@ -768,3 +770,44 @@ class Validator(object):
         if machine.states and not machine.initial_state:
             msg = 'Machine "{0}" has no initial state'.format(machine.name)
             self._raise(msg)
+
+
+class ContainerThread(Thread):
+    def __init__(self, sm,group=None, target=None, name=None,
+                 args=(), kwargs={}, Verbose=None, ):
+        super(ContainerThread,self).__init__(group, target, name, args, kwargs, Verbose)
+        self.sm = sm
+        self.running = False
+        self.target = target
+        self.args = args
+        self.kwargs = kwargs
+
+
+    def start(self):
+        self.running = True
+        super(ContainerThread,self).start()
+
+    def run(self):
+        result = self.target(*self.args, **self.kwargs)
+        if self.running:
+            self.running = False
+            self.sm.dispatch(Event(result))
+
+
+class ThreadContainer(Container):
+    def __init__(self, name, target, *args, **kwargs):
+        super(ThreadContainer, self).__init__(name)
+        self.target = target
+        self.thread = None
+        self.add_handler('enter',self._on_enter)
+        self.add_handler('exit', self._on_exit)
+        self.args = args
+        self.kwargs = kwargs
+
+    def _on_enter(self,*args,**kwargs):
+        self.thread = ContainerThread(target=self.target, sm=self.root,args=self.args,kwargs=self.kwargs)
+        self.thread.start()
+
+
+    def _on_exit(self,*args,**kwargs):
+        self.thread.running = False
