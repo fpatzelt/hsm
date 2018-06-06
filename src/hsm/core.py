@@ -248,6 +248,7 @@ class Container(State):
         self._transitions = TransitionsContainer(self)
         self.state_stack = Stack(maxlen=StateMachine.STACK_SIZE)
         self.leaf_state_stack = Stack(maxlen=StateMachine.STACK_SIZE)
+
         self.state = None
 
     def __getitem__(self, key):
@@ -266,10 +267,17 @@ class Container(State):
 
     def add_state(self, state, initial=False):
         """Add a state to a state the container.
+<<<<<<< HEAD
 
         If states are added, one (and only one) of them has to be declared as
         `initial`.
 
+=======
+
+        If states are added, one (and only one) of them has to be declared as
+        `initial`.
+
+>>>>>>> c49e39e5746eed1ad5506ba952496b7a69101fb6
         :param state: State to be added. It may be an another |Container|
         :type state: |State|
         :param initial: Declare a state as initial
@@ -530,6 +538,7 @@ class StateMachine(Container):
 
     def __init__(self, name):
         super(StateMachine, self).__init__(name)
+
         self._transition_cbs = []
 
     def _get_transition(self, event):

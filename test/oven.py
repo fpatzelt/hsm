@@ -33,6 +33,7 @@ class HeatingState(Container):
 
 
 class Oven(object):
+
     TIMEOUT = 7
 
     def __init__(self):
@@ -59,7 +60,7 @@ class Oven(object):
         door_open.add_handler('exit', self.on_open_exit)
         door_open.add_handler('close', self.on_door_close)
 
-        rosSubscribe(oven, "chatter", String, self.handler)
+        oven.ros_subscribe("chatter", String, self.handler)
         oven.initialize()
         return oven
 
@@ -132,6 +133,7 @@ def test_oven():
     oven.close_door()
     print(oven.state)
     assert oven.state == 'Baking'
+
 
     time.sleep(10)
 

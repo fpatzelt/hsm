@@ -294,6 +294,7 @@ class IntrospectionServer():
             path = ''
 
         # Get a list of children that are also containers
+
         for child in state.states:
 
             # If this is also a container, recurse into it
