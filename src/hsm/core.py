@@ -19,7 +19,7 @@ from six import iteritems
 import collections
 from collections import deque
 import logging
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = logging.getLogger("hsm.core")
 _LOGGER.addHandler(logging.NullHandler())
 
 
@@ -88,6 +88,47 @@ class Event(object):
 
     def __repr__(self):
         return '<Event {0}, userdata={1}>'.format(self.name, self.userdata)
+
+
+class TransitionsContainer(object):
+    def __init__(self, machine):
+        self._machine = machine
+        self._transitions = collections.defaultdict(list)
+
+    def add(self, key, transition):
+        self._transitions[key].append(transition)
+
+    def get(self, event):
+        key = (self._machine.state, event.name)
+        return self._get_transition_matching_condition(key, event)
+
+    def _get_transition_matching_condition(self, key, event):
+        from_state = self._machine.leaf_state
+        for transition in self._transitions[key]:
+            if transition['condition'](from_state, event) is True:
+                return transition
+        key = (self._machine.state, any_event)
+        for transition in self._transitions[key]:
+            if transition['condition'](from_state, event) is True:
+                return transition
+        return None
+
+
+class Stack(object):
+    def __init__(self, maxlen=None):
+        self.deque = deque(maxlen=maxlen)
+
+    def pop(self):
+        return self.deque.pop()
+
+    def push(self, value):
+        self.deque.append(value)
+
+    def peek(self):
+        return self.deque[-1]
+
+    def __repr__(self):
+        return str(list(self.deque))
 
 
 class State(object):
@@ -204,7 +245,10 @@ class Container(State):
     def __init__(self, name):
         super(Container, self).__init__(name)
         self.states = set()
-        self._transition_cbs = []
+        self._transitions = TransitionsContainer(self)
+        self.state_stack = Stack(maxlen=StateMachine.STACK_SIZE)
+        self.leaf_state_stack = Stack(maxlen=StateMachine.STACK_SIZE)
+        self.state = None
 
     def __getitem__(self, key):
         if isinstance(key, State):
@@ -220,15 +264,24 @@ class Container(State):
         state = find_by_name(keys[0])
         return state if len(keys) == 1 else state[keys[1]]
 
-    def add_state(self, state):
-        """Add a state to a state machine.
+    def add_state(self, state, initial=False):
+        """Add a state to a state the container.
 
-        :param state: State to be added. It may be an another |StateMachine|
+        If states are added, one (and only one) of them has to be declared as
+        `initial`.
+
+        :param state: State to be added. It may be an another |Container|
         :type state: |State|
+        :param initial: Declare a state as initial
+        :type initial: bool
         """
-        self.validate_add_state(state)
+        if isinstance(state, string_types):
+            state = State(state)
+        Validator(self).validate_add_state(state, initial)
+        state.initial = initial
         state.parent = self
         self.states.add(state)
+        return state
 
     def add_states(self, *states):
         """Add multiple `states` to the Container.
@@ -238,6 +291,29 @@ class Container(State):
         for state in states:
             self.add_state(state)
 
+    @property
+    def initial_state(self):
+        '''Get the initial state in a state machine.
+
+        :returns: Initial state in a state machine
+        :rtype: |State|
+
+        '''
+        for state in self.states:
+            if state.initial:
+                return state
+        return None
+
+    def set_initial_state(self, state):
+        '''Set an initial state in a state machine.
+
+        :param state: Set this state as initial in a state machine
+        :type state: |State|
+
+        '''
+        Validator(self).validate_set_initial(state)
+        state.initial = True
+
     def get_active_states(self):
         """Get the subset of active states.
 
@@ -245,77 +321,118 @@ class Container(State):
         """
         raise NotImplementedError()
 
-    def validate(self):
-        """Check consistency of this container."""
-        raise NotImplementedError()
+    def add_transition(
+            self, from_state, to_state, events, action=None,
+            condition=None, before=None, after=None):
+        '''Add a transition to a state machine.
 
-    def validate_add_state(self, state):
-        if not isinstance(state, State):
-            raise StateMachineException(self, "Expecting State, but got {0}".format(type(state)))
+        All callbacks take two arguments - `state` and `event`. See parameters
+        description for details.
 
-    def register_transition_cb(self, transition_cb, cb_args=[]):
-        """Adds a transition callback to this container.
-        Transition callbacks receive arguments:
-         - userdata
-         - local_userdata
-         - active_states
-         - *cb_args
-        """
-        self._transition_cbs.append((transition_cb,cb_args))
+        It is possible to create conditional if/elif/else-like logic for
+        transitions. To do so, add many same transition rules with different
+        condition callbacks. First met condition will trigger a transition, if
+        no condition is met, no transition is performed.
 
-    def call_transition_cbs(self):
-        """Calls the registered transition callbacks.
-        Callback functions are called with two arguments in addition to any
-        user-supplied arguments:
-         - userdata
-         - a list of active states
-         """
-        # try:
-        for (cb, args) in self._transition_cbs:
-            cb(None, self.get_active_states(), *args)
-        # except:
-        #     smach.logerr("Could not execute transition callback: " + traceback.format_exc())
+        :param from_state: Source state
+        :type from_state: |State|
+        :param to_state: Target state. If `None`, then it's an `internal
+            transition <https://en.wikipedia.org/wiki/UML_state_machine
+            #Internal_transitions>`_
+        :type to_state: |State|, `None`
+        :param events: List of events that trigger the transition
+        :type events: |Iterable| of |Hashable|
+        :param input: List of inputs that trigger the transition. A transition
+            event may be associated with a specific input. i.e.: An event may
+            be ``parse`` and an input associated with it may be ``$``. May be
+            `None` (default), then every matched event name triggers a
+            transition.
+        :type input: `None`, |Iterable| of |Hashable|
+        :param action: Action callback that is called during the transition
+            after all states have been left but before the new one is entered.
 
+            `action` callback takes two arguments:
 
-class TransitionsContainer(object):
-    def __init__(self, machine):
-        self._machine = machine
-        self._transitions = collections.defaultdict(list)
+                - state: Leaf state before transition
+                - event: Event that triggered the transition
 
-    def add(self, key, transition):
-        self._transitions[key].append(transition)
+        :type action: |Callable|
+        :param condition: Condition callback - if returns `True` transition may
+            be initiated.
 
-    def get(self, event):
-        key = (self._machine.state, event.name)
-        return self._get_transition_matching_condition(key, event)
+            `condition` callback takes two arguments:
 
-    def _get_transition_matching_condition(self, key, event):
-        from_state = self._machine.leaf_state
-        for transition in self._transitions[key]:
-            if transition['condition'](from_state, event) is True:
-                return transition
-        key = (self._machine.state, any_event)
-        for transition in self._transitions[key]:
-            if transition['condition'](from_state, event) is True:
-                return transition
-        return None
+                - state: Leaf state before transition
+                - event: Event that triggered the transition
 
+        :type condition: |Callable|
+        :param before: Action callback that is called right before the
+            transition.
 
-class Stack(object):
-    def __init__(self, maxlen=None):
-        self.deque = deque(maxlen=maxlen)
+            `before` callback takes two arguments:
 
-    def pop(self):
-        return self.deque.pop()
+                - state: Leaf state before transition
+                - event: Event that triggered the transition
 
-    def push(self, value):
-        self.deque.append(value)
+        :type before: |Callable|
+        :param after: Action callback that is called just after the transition
 
-    def peek(self):
-        return self.deque[-1]
+            `after` callback takes two arguments:
 
-    def __repr__(self):
-        return str(list(self.deque))
+                - state: Leaf state after transition
+                - event: Event that triggered the transition
+
+        :type after: |Callable|
+
+        '''
+        # Rather than adding some if statements later on, let's just declare some
+        # neutral items that will do nothing if called. It simplifies the logic a lot.
+        if action is None:
+            action = self._nop
+        if before is None:
+            before = self._nop
+        if after is None:
+            after = self._nop
+        if condition is None:
+            condition = self._nop
+        # handle string names: retrieve State instances
+        from_state = self[from_state]
+        to_state = self[to_state]
+
+        Validator(self).validate_add_transition(from_state, to_state, events, input)
+
+        for event in events:
+            key = (from_state, event)
+            transition = {
+                'from_state': from_state,
+                'to_state': to_state,
+                'action': action,
+                'condition': condition,
+                'before': before,
+                'after': after,
+            }
+            self._transitions.add(key, transition)
+
+    @property
+    def leaf_state(self):
+        '''Get the current leaf state.
+
+        The :attr:`~.StateMachine.state` property gives the current,
+        local state in a state machine. The `leaf_state` goes to the bottom in
+        a hierarchy of states. In most cases, this is the property that should
+        be used to get the current state in a state machine, even in a flat
+        FSM, to keep the consistency in the code and to avoid confusion.
+
+        :returns: Leaf state in a hierarchical state machine
+        :rtype: |State|
+
+        '''
+        return self._get_leaf_state(self)
+
+    def _get_leaf_state(self, state):
+        while hasattr(state, 'state') and state.state is not None:
+            state = state.state
+        return state
 
 
 class StateMachine(Container):
@@ -413,145 +530,7 @@ class StateMachine(Container):
 
     def __init__(self, name):
         super(StateMachine, self).__init__(name)
-        self.state = None
-        self._transitions = TransitionsContainer(self)
-        self.state_stack = Stack(maxlen=StateMachine.STACK_SIZE)
-        self.leaf_state_stack = Stack(maxlen=StateMachine.STACK_SIZE)
-        self.stack = Stack()
-
-    def add_state(self, state, initial=False):
-        '''Add a state to a state machine.
-
-        If states are added, one (and only one) of them has to be declared as
-        `initial`.
-
-        :param state: State to be added. It may be an another |StateMachine|
-        :type state: |State|
-        :param initial: Declare a state as initial
-        :type initial: bool
-
-        '''
-        if isinstance(state, string_types):
-            state = State(state)
-        Validator(self).validate_add_state(state, initial)
-        state.initial = initial
-        super(StateMachine, self).add_state(state)
-        return state
-
-    def set_initial_state(self, state):
-        '''Set an initial state in a state machine.
-
-        :param state: Set this state as initial in a state machine
-        :type state: |State|
-
-        '''
-        Validator(self).validate_set_initial(state)
-        state.initial = True
-
-    @property
-    def initial_state(self):
-        '''Get the initial state in a state machine.
-
-        :returns: Initial state in a state machine
-        :rtype: |State|
-
-        '''
-        for state in self.states:
-            if state.initial:
-                return state
-        return None
-
-    def add_transition(
-            self, from_state, to_state, events, action=None,
-            condition=None, before=None, after=None):
-        '''Add a transition to a state machine.
-
-        All callbacks take two arguments - `state` and `event`. See parameters
-        description for details.
-
-        It is possible to create conditional if/elif/else-like logic for
-        transitions. To do so, add many same transition rules with different
-        condition callbacks. First met condition will trigger a transition, if
-        no condition is met, no transition is performed.
-
-        :param from_state: Source state
-        :type from_state: |State|
-        :param to_state: Target state. If `None`, then it's an `internal
-            transition <https://en.wikipedia.org/wiki/UML_state_machine
-            #Internal_transitions>`_
-        :type to_state: |State|, `None`
-        :param events: List of events that trigger the transition
-        :type events: |Iterable| of |Hashable|
-        :param input: List of inputs that trigger the transition. A transition
-            event may be associated with a specific input. i.e.: An event may
-            be ``parse`` and an input associated with it may be ``$``. May be
-            `None` (default), then every matched event name triggers a
-            transition.
-        :type input: `None`, |Iterable| of |Hashable|
-        :param action: Action callback that is called during the transition
-            after all states have been left but before the new one is entered.
-
-            `action` callback takes two arguments:
-
-                - state: Leaf state before transition
-                - event: Event that triggered the transition
-
-        :type action: |Callable|
-        :param condition: Condition callback - if returns `True` transition may
-            be initiated.
-
-            `condition` callback takes two arguments:
-
-                - state: Leaf state before transition
-                - event: Event that triggered the transition
-
-        :type condition: |Callable|
-        :param before: Action callback that is called right before the
-            transition.
-
-            `before` callback takes two arguments:
-
-                - state: Leaf state before transition
-                - event: Event that triggered the transition
-
-        :type before: |Callable|
-        :param after: Action callback that is called just after the transition
-
-            `after` callback takes two arguments:
-
-                - state: Leaf state after transition
-                - event: Event that triggered the transition
-
-        :type after: |Callable|
-
-        '''
-        # Rather than adding some if statements later on, let's just declare some
-        # neutral items that will do nothing if called. It simplifies the logic a lot.
-        if action is None:
-            action = self._nop
-        if before is None:
-            before = self._nop
-        if after is None:
-            after = self._nop
-        if condition is None:
-            condition = self._nop
-        # handle string names: retrieve State instances
-        from_state = self[from_state]
-        to_state = self[to_state]
-
-        Validator(self).validate_add_transition(from_state, to_state, events, input)
-
-        for event in events:
-            key = (from_state, event)
-            transition = {
-                'from_state': from_state,
-                'to_state': to_state,
-                'action': action,
-                'condition': condition,
-                'before': before,
-                'after': after,
-            }
-            self._transitions.add(key, transition)
+        self._transition_cbs = []
 
     def _get_transition(self, event):
         machine = self.leaf_state.parent
@@ -561,27 +540,6 @@ class StateMachine(Container):
                 return transition
             machine = machine.parent
         return None
-
-    @property
-    def leaf_state(self):
-        '''Get the current leaf state.
-
-        The :attr:`~.StateMachine.state` property gives the current,
-        local state in a state machine. The `leaf_state` goes to the bottom in
-        a hierarchy of states. In most cases, this is the property that should
-        be used to get the current state in a state machine, even in a flat
-        FSM, to keep the consistency in the code and to avoid confusion.
-
-        :returns: Leaf state in a hierarchical state machine
-        :rtype: |State|
-
-        '''
-        return self._get_leaf_state(self)
-
-    def _get_leaf_state(self, state):
-        while hasattr(state, 'state') and state.state is not None:
-            state = state.state
-        return state
 
     def initialize(self):
         '''Initialize states in the state machine.
@@ -594,17 +552,39 @@ class StateMachine(Container):
         state machine in the hierarchy.
 
         '''
-        machines = deque()
-        machines.append(self)
+        states = deque()
+        states.append(self)
         validator = Validator(self)
-        while machines:
-            machine = machines.popleft()
+
+        self.state = self.initial_state
+        s = self.state
+        while isinstance(s,Container):
+            s.state = s.initial_state
+            s = s.state
+
+        while states:
+            machine = states.popleft()
             validator.validate_initial_state(machine)
-            machine.state = machine.initial_state
+            #machine.state = machine.initial_state
             for child_state in machine.states:
-                if isinstance(child_state, StateMachine):
-                    machines.append(child_state)
+                if isinstance(child_state, Container):
+                    states.append(child_state)
         self._enter_states(None, None, self.state)
+
+
+    def register_transition_cb(self, transition_cb, *args):
+        """Adds a transition callback to this container."""
+        self._transition_cbs.append((transition_cb, args))
+
+    def call_transition_cbs(self):
+        """Calls the registered transition callbacks.
+        Callback functions are called with two arguments in addition to any
+        user-supplied arguments:
+         - userdata
+         - a list of active states
+         """
+        for (cb, args) in self._transition_cbs:
+            cb(*args)
 
     def dispatch(self, event):
         '''Dispatch an event to a state machine.

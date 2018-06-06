@@ -3,50 +3,18 @@ from __future__ import print_function
 import threading
 import time
 
-from hsm.core import StateMachine, State, Event
+from hsm.core import State, Container, StateMachine, Event
+from hsm.introspection import IntrospectionServer
+import hsm.ros  # augments hsm.core.State with ros_subscribe()
+
 import logging
 logging.getLogger('pysm').setLevel(logging.INFO)
 
 import rospy
 from std_msgs.msg import String
 
-from introspection import IntrospectionServer
-
-class ROSEvent(object):
-    def __init__(self, topic, msg_type, handler):
-        self.topic = topic
-        self.msg_type = msg_type
-        self.handler = handler
-        self.subscriber = None
-
-
-def subscribe_ros_events(state, event):
-    # subscribe events
-    for e in state._ros_events:
-        print("subscribing to", e.topic)
-        e.subscriber = rospy.Subscriber(e.topic, e.msg_type, e.handler)
-
-
-def unsubscribe_ros_events(state, event):
-    # unsubscribe events
-    for e in state._ros_events:
-        del e.subscriber
-        print("unsubscribed from", e.topic)
-
-
-def rosSubscribe(state, topic, msg_type, handler):
-    if not hasattr(state, '_ros_events'):
-        # define _ros_events attribute
-        state._ros_events = []
-        # on enter, subscribe to topics
-        state.add_handler('enter', subscribe_ros_events)
-        # on exit, unsubscribe
-        state.add_handler('exit', unsubscribe_ros_events)
-    state._ros_events.append(ROSEvent(topic, msg_type, handler))
-
-
 # It's possible to encapsulate all state related behaviour in a state class.
-class HeatingState(StateMachine):
+class HeatingState(Container):
     def __init__(self, name):
         super(HeatingState, self).__init__(name)
         baking = State('Baking')
@@ -65,7 +33,7 @@ class HeatingState(StateMachine):
 
 
 class Oven(object):
-    TIMEOUT = 6
+    TIMEOUT = 7
 
     def __init__(self):
         self.sm = self._get_state_machine()
@@ -74,7 +42,7 @@ class Oven(object):
     def _get_state_machine(self):
         oven = StateMachine('Oven')
 
-        door_closed = StateMachine('Door closed')
+        door_closed = Container('Door closed')
         oven.add_state(door_closed, initial=True)
         off = door_closed.add_state('Off', initial=True)
         heating = door_closed.add_state(HeatingState('Heating'))
@@ -143,9 +111,9 @@ class Oven(object):
 
 def test_oven():
     oven = Oven()
-    sis = IntrospectionServer('server_name', oven.sm, 'Oven')
-
-    sis.start()
+    sis = IntrospectionServer('hsm_introspection', oven.sm, 'Oven')
+    sis_thread = threading.Thread(target=sis.start)
+    sis_thread.start()
 
     print(oven.state)
     assert oven.state == 'Off'
@@ -165,13 +133,17 @@ def test_oven():
     print(oven.state)
     assert oven.state == 'Baking'
 
-    time.sleep(7)
+    time.sleep(10)
 
     print(oven.state)
     assert oven.state == 'Off'
 
+    oven.toast()
     time.sleep(5)
-
+    print(oven.state)
+    assert oven.state == 'Toasting'
+    time.sleep(5)
+    sis.stop()
 
 if __name__ == '__main__':
     rospy.init_node('oven')

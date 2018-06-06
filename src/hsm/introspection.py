@@ -144,10 +144,6 @@ class ContainerProxy():
             data_class=SmachContainerStatus,
             queue_size=1)
 
-        # Set transition callback
-        #TODO
-        container.register_transition_cb(self._transition_cb)
-
         # Create thread to constantly publish
         self._status_pub_thread = threading.Thread(name=server_name + ':status_publisher', target=self._status_pub_loop)
 
@@ -195,11 +191,11 @@ class ContainerProxy():
         outcomes_from = []
         outcomes_to = []
 
-        for k,transitions in self._container._transitions._transitions.items():
-            for t in transitions:
-                internal_outcomes.append(k[1])
-                outcomes_from.append(t['from_state'].name)
-                outcomes_to.append(t['to_state'].name)
+        # for k,transitions in self._container._transitions._transitions.items():
+        #     for t in transitions:
+        #         internal_outcomes.append(k[1])
+        #         outcomes_from.append(t['from_state'].name)
+        #         outcomes_to.append(t['to_state'].name)
         container_outcomes = set()#self._container.get_registered_outcomes()
 
         # Construct structure message
@@ -217,7 +213,7 @@ class ContainerProxy():
             if not rospy.is_shutdown():
                 rospy.logerr("Publishing SMACH introspection structure message failed.")
 
-    def _publish_status(self, info_str=''):
+    def _publish_status(self, info_str=""):
         """Publish current state of this container."""
         # Construct messages
         with self._status_pub_lock:
@@ -226,25 +222,19 @@ class ContainerProxy():
             # print str(structure_msg)
             # Construct status message
             # print self._container.get_active_states()
+            active_state_names = []
+            if self._container.state != None:
+                active_state_names.append(self._container.state.name)
+
             state_msg = SmachContainerStatus(
                 Header(stamp=rospy.Time.now()),
                 path,
                 [self._container.initial_state.name],
-                [self._container.state.name],
+                active_state_names,
                 pickle.dumps(smach.UserData()._data, 2),
                 info_str)
             # Publish message
             self._status_pub.publish(state_msg)
-
-    ### Transition reporting
-    def _transition_cb(self, *args, **kwargs):
-        """Transition callback, passed to all internal nodes in the tree.
-        This callback locks an internal mutex, preventing any hooked transitions
-        from occurring while we're walking the tree.
-        """
-        info_str = (str(args) + ', ' + str(kwargs))
-        rospy.logdebug("Transitioning: " + info_str)
-        self._publish_status(info_str)
 
     def _init_cmd_cb(self, msg):
         """Initialize a tree's state and userdata."""
@@ -274,7 +264,7 @@ class ContainerProxy():
 class IntrospectionServer():
     """Server for providing introspection and control for smach."""
 
-    def __init__(self, server_name, state, path):
+    def __init__(self, server_name, machine, path):
         """Traverse the smach tree starting at root, and construct introspection
         proxies for getting and setting debug state."""
 
@@ -283,12 +273,13 @@ class IntrospectionServer():
 
         # Store args
         self._server_name = server_name
-        self._state = state
+        self._machine = machine
         self._path = path
 
     def start(self):
         # Construct proxies
-        self.construct(self._server_name, self._state, self._path)
+        proxy = self.construct(self._server_name, self._machine, self._path)
+        self._machine.register_transition_cb(self._transition_cb, proxy)
 
     def stop(self):
         for proxy in self._proxies:
@@ -303,7 +294,6 @@ class IntrospectionServer():
             path = ''
 
         # Get a list of children that are also containers
-        #print('Current state: ',state.name, [s.name for s in state.states])
         for child in state.states:
 
             # If this is also a container, recurse into it
@@ -312,14 +302,18 @@ class IntrospectionServer():
 
 
         # Publish initial state
-        proxy._publish_status("Initial state")
+        proxy._publish_status('Initial state')
 
         # Start publisher threads
         proxy.start()
 
         # Store the proxy
         self._proxies.append(proxy)
+        return proxy
 
     def clear(self):
         """Clear all proxies in this server."""
         self._proxies = []
+
+    def _transition_cb(self, proxy):
+        proxy._publish_status()
