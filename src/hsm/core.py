@@ -635,7 +635,7 @@ class StateMachine(Container):
             exit_event._machine = self
             state._on(exit_event)
             state.parent.state_stack.push(state)
-            state.parent.state = state.parent.initial_state
+            state.parent.state = None
             state = state.parent
         return state
 
