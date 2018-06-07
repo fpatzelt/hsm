@@ -2,7 +2,7 @@ import roslib
 
 #roslib.load_manifest('smach_ros')
 import rospy
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 
 import pickle
 import threading
@@ -19,6 +19,7 @@ __all__ = ['IntrospectionServer']
 STATUS_TOPIC = '/smach/container_status'
 INIT_TOPIC = '/smach/container_init'
 STRUCTURE_TOPIC = '/smach/container_structure'
+TRANSITION_TOPIC = '/smach/transition'
 
 from hsm.core import Container
 
@@ -274,6 +275,11 @@ class IntrospectionServer():
         self._server_name = server_name
         self._machine = machine
         self._path = path
+        self._transition_cmd = rospy.Subscriber(
+            server_name + TRANSITION_TOPIC,
+            String,
+            self._transition_cmd_cb)
+
 
     def start(self):
         # Construct proxies
@@ -288,7 +294,7 @@ class IntrospectionServer():
         """Recursively construct proxies to containers."""
         # Construct a new proxy
         proxy = ContainerProxy(server_name, state, path)
-
+        #self._machine.register_transition_cb(self._transition_cb, proxy)
         if path == '/':
             path = ''
 
@@ -316,3 +322,15 @@ class IntrospectionServer():
 
     def _transition_cb(self, proxy):
         proxy._publish_status()
+
+    def _transition_cmd_cb(self, msg):
+        to_state = self._machine
+        for k in msg.data.split('/')[1:]:
+            if to_state:
+                to_state = to_state[k]
+
+        if to_state:
+            from_state = self._machine.leaf_state
+            top_state = self._machine._exit_states(None, from_state, to_state)
+            self._machine._enter_states(None, top_state, to_state)
+            self._machine.call_transition_cbs()
